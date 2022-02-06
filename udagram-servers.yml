@@ -1,0 +1,213 @@
+Description:
+  Created by Roni Yaniv.
+  Udagram project for Udacity DevOps NanoDegree online course (Part 3, Project 2).
+  This creates the servers and Load Balancers for this project.
+
+Parameters:
+  EnvironmentName:
+    Type: String
+  KeyName: # Make sure to update the params json with your own key
+    Description: The EC2 Key Pair to allow SSH access to the web app instances
+    Type: AWS::EC2::KeyPair::KeyName
+  JumpboxKeyName:
+    Description: The EC2 Key Pair to allow SSH access to the jumpbox
+    Type: AWS::EC2::KeyPair::KeyName
+  WebAppAMI:
+    Description: defines which AMI to use for the web app instances (default is an Ubuntu 18 AMI, part of the free tier )
+    Type: String
+    Default: ami-042ad9eec03638628
+  WebAppInstanceType: 
+    Description: defines which instance type to use for the web app instances
+    Type: String
+    Default: t2.micro # free tier by default. params file can specify non-free type.
+  JumpboxAMI:
+    Description: defines which AMI to use for the jumpbox (Amazon Linux free tier is sufficient)
+    Type: String
+    Default: ami-04c921614424b07cd
+  JumpboxInstanceType: 
+    Description: defines which instance type to use for the web app instances
+    Type: String
+    Default: t2.micro
+  WebAppLaunchTemplateVersion:
+    Type: String
+    Default: 1
+
+
+Resources:
+  # Create a IAM Role, IAM Instance Profile and IAM Policy to let the EC2 instances be able to access S3
+  # More info here: https://docs.aws.amazon.com/autoscaling/ec2/userguide/us-iam-role.html
+  # and here: https://www.bogotobogo.com/DevOps/AWS/aws-creating-IAM-Roles-and-associating-them-with-EC2-Instances-in-CloudFormation.php
+
+  S3AccessIAMRole:
+    Type: AWS::IAM::Role
+    Properties: 
+      AssumeRolePolicyDocument:
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service:
+                - ec2.amazonaws.com
+            Action:
+              - 'sts:AssumeRole'
+      Path: /
+  S3AccessIAMInstanceProfile:
+    Type: AWS::IAM::InstanceProfile
+    Properties: 
+      Path: /
+      Roles:
+        - Ref: S3AccessIAMRole
+  S3AccessIAMPolicy:
+    Type: AWS::IAM::Policy
+    Properties:
+        PolicyName: S3AccessPolicy
+        PolicyDocument:
+          Statement:
+            - Effect: Allow
+              Action: 's3:GetObject*'
+              Resource: '*'
+        Roles: 
+          - Ref: "S3AccessIAMRole"
+
+  # Create a launch template for the web app servers
+  WebAppLaunchTemplate:
+    Type: AWS::EC2::LaunchTemplate
+    Properties:
+      LaunchTemplateData:
+        BlockDeviceMappings:
+        - DeviceName: "/dev/sdk"
+          Ebs:
+            VolumeSize: '10'
+        IamInstanceProfile:
+          Arn: !GetAtt S3AccessIAMInstanceProfile.Arn
+        ImageId: !Ref WebAppAMI
+        InstanceType: !Ref WebAppInstanceType
+        KeyName: !Ref KeyName
+        SecurityGroupIds:
+          - !ImportValue
+            Fn::Sub: '${EnvironmentName}-WebServerSecGroup'
+        UserData: # more info: https://docs.aws.amazon.com/AWSEC2/latest/UserGuide/user-data.html
+          Fn::Base64: !Sub |
+            #!/bin/bash
+            # update package db (will allow installing awscli)
+            apt-get update -y
+            # install aws cli (to be able to copy from s3)
+            apt-get install awscli -y
+            apt-get install apache2 -y
+            systemctl start apache2.service
+            cd /var/www/html
+            aws s3 cp s3://udagram-project/index.html /var/www/html/index.html
+            # file was copied as root, change its permissions to be available to the regular user (ubuntu)
+            chown ubuntu /var/www/html/index.html
+
+  # Create an auto-scaling group
+  WebAppGroup:
+    Type: AWS::AutoScaling::AutoScalingGroup
+    Properties:
+      # The VPCZoneIdentifier is a *list* of subnet IDs for a virtual private cloud (VPC) where instances in the Auto Scaling group can be created. We are using the private subnets.
+      VPCZoneIdentifier:
+      - !ImportValue 
+        Fn::Sub: "${EnvironmentName}-PrivateSubnet-1"
+      - !ImportValue
+        Fn::Sub: "${EnvironmentName}-PrivateSubnet-2"
+      LaunchTemplate:
+        LaunchTemplateId: !Ref WebAppLaunchTemplate
+        Version: !Ref WebAppLaunchTemplateVersion
+      MinSize: 4 # should create at least 2 per AZ
+      MaxSize: 8
+      # A target group is a group of registered instances, to whom the traffic will be routed. The ARN (Amazon Resource Names) serves as a unique ID for any resource. The TargetGroupARNs property refers to the ARNs of the load balancer target group that we will create below
+      TargetGroupARNs:
+      - Ref: WebAppTargetGroup
+      # HealthCheckGracePeriod: 60
+      # HealthCheckType: ELB
+ 
+  # Create an LB target group
+  WebAppTargetGroup:
+    Type: AWS::ElasticLoadBalancingV2::TargetGroup
+    Properties:
+      HealthCheckIntervalSeconds: 10 # The time it takes to determine a non-responsive target is unhealthy
+      HealthCheckPath: /
+      HealthCheckProtocol: HTTP
+      HealthCheckTimeoutSeconds: 8
+      HealthyThresholdCount: 2 # The number of healthy/unhealthy checks required to change the health status
+      Port: 80
+      Protocol: HTTP
+      UnhealthyThresholdCount: 5 # The number of healthy/unhealthy checks required to change the health status
+      VpcId: 
+        Fn::ImportValue:
+          Fn::Sub: "${EnvironmentName}-VPCID"
+
+  # Create the LB
+  # Our load balancer will be present in both public subnets, and use the dedicated security group we created earlier
+  WebAppLB:
+    Type: AWS::ElasticLoadBalancingV2::LoadBalancer
+    Properties:
+      # At least two subnets in two different Availability Zones must be specified 
+      Subnets:
+        - Fn::ImportValue: !Sub "${EnvironmentName}-PublicSubnet-1"
+        - Fn::ImportValue: !Sub "${EnvironmentName}-PublicSubnet-2"
+      SecurityGroups:
+        - Fn::ImportValue: !Sub '${EnvironmentName}-LBSecGroup'
+
+  # The listener to attach to our load balancer 
+  WebAppLBListener:
+    Type: AWS::ElasticLoadBalancingV2::Listener
+    Properties:
+      DefaultActions:
+      - Type: forward
+        TargetGroupArn:
+          Ref: WebAppTargetGroup
+      LoadBalancerArn:
+        Ref: WebAppLB
+      Port: '80'
+      Protocol: HTTP
+
+  # A Listener requires a Listener Rule. The Listener Rule below will determine how (condition) the load balancer's connection requests are routed to the registered targets
+  ALBListenerRule:
+    Type: AWS::ElasticLoadBalancingV2::ListenerRule
+    Properties:
+      Actions:
+      - Type: forward
+        TargetGroupArn: !Ref 'WebAppTargetGroup'
+      Conditions:
+      - Field: path-pattern
+        Values: [/] # route all connection requests with the default root (/) endpoint to the specified target group
+      ListenerArn: !Ref 'WebAppLBListener'
+      Priority: 1
+
+  # Create a jump box
+  JumpboxInstance:
+    Type: 'AWS::EC2::Instance'
+    Properties:
+      ImageId: !Ref JumpboxAMI
+      InstanceType: !Ref JumpboxInstanceType
+      KeyName: !Ref JumpboxKeyName
+      NetworkInterfaces: 
+        - AssociatePublicIpAddress: "true"
+          DeviceIndex: 0
+          #associate the instance with the first public subnet we setup
+          SubnetId: 
+            Fn::ImportValue: !Sub '${EnvironmentName}-PublicSubnet-1'
+          GroupSet:
+            - !ImportValue
+              Fn::Sub: '${EnvironmentName}-SSHOnlySecGroup'
+      Tags:
+        - Key: Name
+          Value: JumpBox 
+
+Outputs:
+  LoadBalancer:
+    Description: A reference to the Application Load Balancer
+    Value: !Ref WebAppLB
+
+  LoadBalancerUrl:
+    Description: The URL of the ALB
+    Name: LoadBalancerUrl
+    Value: 
+      !Join 
+        - ''
+        - - 'http://'
+          - !GetAtt WebAppLB.DNSName
+
+  LoadBalancerListener:
+    Description: A reference to a port 80 listener
+    Value: !Ref WebAppLBListener

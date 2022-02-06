@@ -1,0 +1,18 @@
+[
+	{
+		"ParameterKey": "EnvironmentName",
+		"ParameterValue": "Udagram"
+	},{
+		"ParameterKey": "KeyName",
+		"ParameterValue": "your-rsa-key"
+	},{
+		"ParameterKey": "JumpboxKeyName",
+		"ParameterValue": "your-rsa-key"
+	},{
+		"ParameterKey": "WebAppAMI",
+		"ParameterValue": "ami-042ad9eec03638628"
+	},{
+		"ParameterKey": "WebAppInstanceType",
+		"ParameterValue": "t3.medium"
+	}
+]
