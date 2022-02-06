@@ -81,7 +81,6 @@ Resources:
           Arn: !GetAtt S3AccessIAMInstanceProfile.Arn
         ImageId: !Ref WebAppAMI
         InstanceType: !Ref WebAppInstanceType
-        KeyName: !Ref KeyName
         SecurityGroupIds:
           - !ImportValue
             Fn::Sub: '${EnvironmentName}-WebServerSecGroup'
